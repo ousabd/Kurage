@@ -1,0 +1,8 @@
+---
+title: "Kurage"
+author: "Oussama Abdoun"
+format: html
+editor: visual
+---
+
+Home page for Kurage projects.
