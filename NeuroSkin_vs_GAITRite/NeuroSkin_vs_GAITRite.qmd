@@ -1,5 +1,10 @@
 ---
 title: "Comparative Analysis of Wearable NeuroSkin and Non-Wearable GAITRite Sensor Systems for Gait Assessment in Healthy People"
+
+execute: 
+  message: false
+  warning: false
+  
 format:
   html:
     toc: true
@@ -7,8 +12,17 @@ format:
     toc-expand: 2
     lightbox: true
     link-external-newwindow: true
+    link-external-icon: true
     code-fold: true
     code-summary: "Show the code"
+    other-links:
+      - text: Manuscript
+        href: https://data.nasa.gov/
+      - text: Definition of gait parameters
+        href: https://www.tekscan.com/blog/medical/gait-cycle-phases-parameters-evaluate-technology
+    # include-in-header:
+    #   - text: |
+    #     <link rel = "shortcut icon" href = "../kurage_logo_cropped.jpeg" />
 ---
 
 # Literature {#sec-literature}
@@ -34,12 +48,12 @@ Concurrent validity study between GAITrite and a tri-axial accelerometer ([doi](
 ## Libraries & settings
 
 ```{r}
-library(ggh4x)
-library(magrittr)
-library(DT)
-library(tidyverse)
+library(magrittr)   # advances piping operators such as %$%
+library(DT)         # interactive data tables
+library(ggh4x)      # advanced customization of ggplots
+library(tidyverse)  # data loading & wrangling; loaded last to avoid functions being masked by other packages
 
-theme_set(theme_minimal())
+theme_set(theme_minimal()) # lean theme for ggplots
 
 path.data <- file.path("./data")
 ```
@@ -50,23 +64,33 @@ path.data <- file.path("./data")
 
 ```{r}
 process_1file <- function(file) {
-    file %>% 
-        read_delim(delim = ";", skip = 1,
-                col_names = c("GAITRite","NeuroSkin"),
-                col_types = "cc") %>% 
-        mutate(across(c(GAITRite, NeuroSkin), ~as.numeric(str_replace(.,",",".")))) %>% 
-        mutate(file_name = str_extract(basename(file), "(?<=\\().*?(?=\\))")) %>% 
-        separate(file_name, into = c("side", "metric"), sep = "_", extra = "merge")
+  file %>% 
+    # --- load the csv file
+    read_delim(delim = ";", skip = 1,
+               col_names = c("GAITRite","NeuroSkin"),
+               col_types = "cc") %>% 
+    # --- replace the comma decimal symbol by a dot
+    mutate(across(c(GAITRite, NeuroSkin), ~as.numeric(str_replace(.,",",".")))) %>% 
+    # --- extract side and metric from the filename
+    mutate(file_name = str_extract(basename(file), "(?<=\\().*?(?=\\))")) %>% 
+    separate(file_name, into = c("side", "metric"), sep = "_", extra = "merge") %>% 
+    # --- homogenize string case
+    mutate(across(metric, str_to_sentence))
 }
 
-csv_files <- list.files(path = path.data, pattern = "\\.csv$", full.names = TRUE)
+csv_files <- list.files(path = path.data, pattern = "\\.csv$", # list all csv in th path.data
+                        full.names = TRUE)
 
+# Apply the file processing to all listed files 
 df <- map_dfr(csv_files, process_1file)
+
+# Only for testing  of custom functions used in ICC, TOST, etc. :
+data <- df %>% filter(side == "Left", metric == "Step_length")
 ```
 
 ### Plot correlations
 
-Phase parameters do not correlate between the two devices: this is reflected in negative ICC for these parameters (see \[ICC\](\@sec-icc)
+Phase parameters do not correlate between the two devices: this is reflected in negative ICC for these parameters (see [ICC](#sec-icc))
 
 ```{r}
 #| fig-width: 18
@@ -83,11 +107,87 @@ ggplot(df, aes(x = NeuroSkin, y = GAITRite)) +
         strip.clip = "off")
 ```
 
-### Redundancies in gait parameters
+## Redundancies in gait parameters
 
 Reference: <https://www.tekscan.com/blog/medical/gait-cycle-phases-parameters-evaluate-technology>
 
-In theory, swing phase = single support phase (same definitions), but this is never the case in the data:
+### Stride/Cycle = 2x step
+
+In theory, 1 stride = 2 steps, which should be reflected in both the time and length metrics.
+
+In practice, it is almost never the case in data and discrepancies can not always be explained by rounding errors, suggesting that they are computed independently:
+
+```{r}
+df %>% 
+  filter(metric %in% c("Cycle_time", "Step_time")) %>% 
+  group_by(side, metric) %>%  mutate(id = row_number(), .before = 1) %>% 
+  gather(key = device, value = value, GAITRite, NeuroSkin) %>% 
+  spread(key = metric, value = value) %>% 
+  mutate(`equal?` = as.numeric(abs(Cycle_time - 2*Step_time) <= .02)) %>% 
+  arrange(device, side) %>%
+  datatable(filter = "top",
+            options = list(pageLength = 9))
+
+df %>% 
+  filter(metric %in% c("Stride_length", "Step_length")) %>% 
+  group_by(side, metric) %>%  mutate(id = row_number(), .before = 1) %>% 
+  gather(key = device, value = value, GAITRite, NeuroSkin) %>% 
+  spread(key = metric, value = value) %>% 
+  mutate(`equal?` = as.numeric(abs(Stride_length - 2*Step_length) <= .02)) %>% 
+  arrange(device, side) %>%
+  datatable(filter = "top",
+            options = list(pageLength = 9))
+```
+
+### Stance phase = Stance time / Cycle time
+
+In theory, stance phase is the proportion of cycle time spent in stance.
+
+In practice, there are small discrepancies that could be explained by rounding errors.
+
+```{r}
+#| column: page
+
+df %>% 
+  filter(metric %in% c("Stance_phase", "Stance_time", "Cycle_time")) %>% 
+  group_by(side, metric) %>% mutate(id = row_number(), .before = 1) %>% 
+  gather(key = device, value = value, GAITRite, NeuroSkin) %>% 
+  spread(key = metric, value = value) %>% 
+  mutate(stance_by_cycle = round(100 * Stance_time / Cycle_time, 3)) %>% 
+  mutate(`equal?` = as.numeric(Stance_phase == stance_by_cycle)) %>% 
+  arrange(device, side) %>%
+  datatable(filter = "top",
+            options = list(pageLength = 9))
+
+```
+
+### Swing phase = Swing time / Cycle time
+
+In theory, stance phase is the proportion of cycle time spent in stance.
+
+In practice, there are small discrepancies that could be explained by rounding errors.
+
+```{r}
+#| column: page
+
+df %>% 
+  filter(metric %in% c("Swing_phase", "Swing_time", "Cycle_time")) %>% 
+  group_by(side, metric) %>% mutate(id = row_number(), .before = 1) %>% 
+  gather(key = device, value = value, GAITRite, NeuroSkin) %>% 
+  spread(key = metric, value = value) %>% 
+  mutate(swing_by_cycle = round(100 * Swing_time / Cycle_time, 3)) %>% 
+  mutate(`equal?` = as.numeric(Swing_phase == swing_by_cycle)) %>% 
+  arrange(device, side) %>%
+  datatable(filter = "top",
+            options = list(pageLength = 9))
+
+```
+
+### Swing phase = single support phase
+
+In theory, swing phase = single support phase (same definitions).
+
+In practice, it is never the case in the data, and discrepancies can not be explained by rounding errors:
 
 ```{r}
 #| column: page
@@ -97,13 +197,15 @@ df %>%
   group_by(side, metric) %>%  mutate(id = row_number(), .before = 1) %>% 
   gather(key = device, value = value, GAITRite, NeuroSkin) %>% 
   spread(key = metric, value = value) %>% 
-  mutate(`equal?` = as.numeric(Swing_phase == Single_support_phase)) %>% 
+  mutate(`equal?` = as.numeric(round(abs(Swing_phase - Single_support_phase),1) <= 0.1)) %>% 
   arrange(device, side) %>%
   datatable(filter = "top",
             options = list(pageLength = 9))
 ```
 
-In theory, stance phase = single + double support phase, but this only the case for NeuroSkin, suggesting that the two devices differ in how they compute these gait parameters:
+### Stance phase = Single + Double support phases
+
+In theory, stance phase = single + double support phase, but this only the case for NeuroSkin (up to rounding error), suggesting that the two devices differ in how they compute these gait parameters:
 
 ```{r}
 #| column: page
@@ -115,7 +217,7 @@ df %>%
   spread(key = metric, value = value) %>% 
   mutate(single_plus_double = round(Single_support_phase + Double_support_phase, 2),
          .keep = "unused") %>% 
-  mutate(`equal?` = as.numeric(single_plus_double == Stance_phase)) %>% 
+  mutate(`equal?` = as.numeric(round(abs(single_plus_double - Stance_phase),2) <= 0.01)) %>% 
   arrange(device, side) %>%
   datatable(filter = "top",
             options = list(pageLength = 9))
@@ -148,6 +250,7 @@ compute_icc <- function(data) {
 ### Compute {#sec-icc}
 
 ```{r}
+#| cache: true
 #| column: page
 
 # Pearson correlation
@@ -205,6 +308,7 @@ compute_abserror_bootci <- function(data, n = 1000) {
 ### Compute
 
 ```{r}
+#| cache: true
 #| column: page
 
 # Calculate relative errors
@@ -214,6 +318,7 @@ df.error <- df %>%
 
 # Print data in interactive table
 df.error %>%
+  mutate(across(contains("error"), ~round(.,3))) %>% 
   datatable(filter = "top",
             options = list(pageLength = 9))
 
@@ -240,30 +345,55 @@ We use the generic function `tsum_TOST()` from the `{TOSTER}` package by Daniel 
 
 ```{r}
 library(TOSTER)
+library(BayesFactor)
+
+# Values from Mael's document
+eqb.mael <- list("Step_length" = 2.7,
+                 "Step_time" = 0.025,
+                 "Cycle_time" = 0.03,
+                 "Stride_length" = 2.5,
+                 "Swing_time" = 0.03,
+                 "Stance_time" = 0.05,
+                 "Swing_phase" = 2.5,
+                 "Stance_phase" = 2.5,
+                 "Single_support_phase" = 2,
+                 "Double_support_phase" = 3
+)
+
 
 compute_TOST <- function(data, eqb_mode = "Mael") {
   
+  # Select/calculate equivalence boundaries
   if (tolower(as.character(eqb_mode)) == "mael") {
     eqb = eqb.mael[[unique(data$metric)]] # Mael bounds
   } else if (is.numeric(eqb_mode)) {
     eqb = eqb_mode*mean(data$GAITRite) # bounds = X% of GAITRite mean
   }
   
-  out <- data %$% 
+  # Apply TOST
+  res.tost <- data %$% 
     TOSTER::tsum_TOST(m1 = mean(GAITRite-NeuroSkin),
                       sd1 = sd(GAITRite-NeuroSkin),
                       n1 = length(GAITRite-NeuroSkin),
                       eqb = eqb
     )
   
-  out$TOST %>% 
+  # Calculate BF
+  ttestBF(data$GAITRite, data$NeuroSkin, nullInterval = eqb*c(-1,1), paired = TRUE)
+  ttestBF(data$GAITRite, data$NeuroSkin, paired = TRUE)
+
+  # Build output
+  out <- c()
+  
+  out$TOST <- res.tost$TOST %>% 
     select(p.value) %>% 
     rownames_to_column %>% 
     spread(key = rowname, value = p.value) %>% 
     mutate(metric = unique(data$metric),
            side = unique(data$side),
-           .before = 1) %>% 
-    return()
+           .before = 1)
+  
+  return(out$TOST)
 }
 ```
 
@@ -274,19 +404,8 @@ p-values are exactly reproduced.
 But these boundaries are inconsistent with data, e.g. it's narrower for the single than for the double support phase , although gait values are higher for single than double.
 
 ```{r}
+#| cache: true
 #| column: page
-
-eqb.mael <- list("Step_Length" = 2.7,
-                 "Step_Time" = 0.025,
-                 "Cycle_Time" = 0.03,
-                 "Stride_length" = 2.5,
-                 "Swing_time" = 0.03,
-                 "Stance_time" = 0.05,
-                 "Swing_phase" = 2.5,
-                 "Stance_phase" = 2.5,
-                 "Single_support_phase" = 2,
-                 "Double_support_phase" = 3
-)
 
 df.tost.mael <- df %>%
   group_split(metric,side) %>%  # Split by group
@@ -300,6 +419,7 @@ df.tost.mael %>%
 ### Equivalence boundaries = +/- 5% of mean GAITRite values
 
 ```{r}
+#| cache: true
 #| column: page
 
 df.tost.5perc <- df %>%
