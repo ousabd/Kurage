@@ -4,12 +4,14 @@ title: "Comparative Analysis of Wearable NeuroSkin and Non-Wearable GAITRite Sen
 execute: 
   message: false
   warning: false
+  cache: refresh
   
 format:
   html:
     toc: true
     toc-depth: 3
     toc-expand: 2
+    toc-location: left-body
     lightbox: true
     link-external-newwindow: true
     link-external-icon: true
@@ -27,7 +29,7 @@ format:
 
 # Literature {#sec-literature}
 
-Meta-analysis of 32 publications (44 studies) across 4 walkway systems (including 39 studies with GAITrite): [doi](doi.org/10.23736/S1973-9087.22.07037-X)
+Meta-analysis of 32 publications (44 studies) across 4 walkway systems (including 39 studies with GAITrite): Parati et al. 2022 ([doi](doi.org/10.23736/S1973-9087.22.07037-X))
 
 -   21 (resp. 23) studies with intra-session (resp. inter-session) test-retest
 
@@ -35,7 +37,7 @@ Meta-analysis of 32 publications (44 studies) across 4 walkway systems (includin
 
 -   ICC is equally good across most measures and conditions (fig. 4)
 
-Concurrent validity study between GAITrite and a tri-axial accelerometer ([doi](doi.org/10.1371/journal.pone.0158956)):
+Concurrent validity study between GAITrite and a tri-axial accelerometer: Byun et al. 2016 ([doi](doi.org/10.1371/journal.pone.0158956)):
 
 -   82 subjects, 4.5m GAITrite, 4x2 trials
 
@@ -43,18 +45,39 @@ Concurrent validity study between GAITrite and a tri-axial accelerometer ([doi](
 
 -   ICC between the 2 devices is excellent (\>0.90, reported for general parameters only, fig. 4)
 
+Authoritative methodological paper on ICC: Koo & Li 2016 ([doi](https://doi.org/10.1016/j.jcm.2016.02.012))\
+=\> résumé en français sur [Datanovia](https://www.datanovia.com/en/fr/lessons/coefficient-de-correlation-intra-classe-dans-r)
+
 # Analysis
 
 ## Libraries & settings
 
 ```{r}
-library(magrittr)   # advances piping operators such as %$%
+
+# Stats
+library(psych)      # ICC, consistency only!!
+library(irr)        # ICC, absolute agreement
+library(boot)       # bootstrapping
+library(car)        # bootstrapping confidence intervals
+library(TOSTER)     # equivalence testing (TOST)
+library(BayesFactor)
+
+# Visualization
 library(DT)         # interactive data tables
 library(ggh4x)      # advanced customization of ggplots
+
+# Data wrangling
+library(magrittr)   # advances piping operators such as %$%
 library(tidyverse)  # data loading & wrangling; loaded last to avoid functions being masked by other packages
 
+
+# ggplot2 theme
 theme_set(theme_minimal()) # lean theme for ggplots
 
+# DT interactive tables options
+options(DT.options = list(dom = 'ti'))
+
+# Paths
 path.data <- file.path("./data")
 ```
 
@@ -73,7 +96,11 @@ process_1file <- function(file) {
     mutate(file_name = str_extract(basename(file), "(?<=\\().*?(?=\\))")) %>% 
     separate(file_name, into = c("side", "metric"), sep = "_", extra = "merge") %>% 
     # --- homogenize string case
-    mutate(across(metric, str_to_sentence))
+    mutate(across(metric, str_to_sentence)) %>% 
+    # --- add subject id
+    mutate(id = paste0("S",row_number())) %>% 
+    # --- reorder columns
+    select(id, metric, side, everything())
 }
 
 csv_files <- list.files(path = path.data, pattern = "\\.csv$", # list all csv in th path.data
@@ -82,8 +109,21 @@ csv_files <- list.files(path = path.data, pattern = "\\.csv$", # list all csv in
 # Apply the file processing to all listed files 
 df <- map_dfr(csv_files, process_1file)
 
-# Only for testing  of custom functions used in ICC, TOST, etc. :
-data <- df %>% filter(side == "Left", metric == "Step_length")
+# Append average of Left and Right
+df %<>% 
+  gather(key = device, value = value, GAITRite, NeuroSkin) %>% 
+  group_by(id, metric, device) %>% 
+  summarise(value = mean(value)) %>% 
+  mutate(side = "Avg") %>% 
+  spread(device, value) %>%
+  ungroup %>% 
+  bind_rows(df)
+  
+df %>% group_by(metric, side) %>% summarise(across(is.numeric, mean))
+# Only for testing  of helper functions used in ICC, TOST, etc.:
+data <- df %>% filter(side == "Right", metric == "Swing_time") %>% select(-id)
+
+
 ```
 
 ## Correlations
@@ -94,9 +134,9 @@ Phase parameters do not correlate between the two devices: this is reflected in 
 
 ```{r}
 #| fig-width: 18
-#| fig-height: 4
+#| fig-height: 6
 #| fig-cap: "Click figure to enlarge"
-#| column: screen
+#| column: screen-inset
 
 ggplot(df, aes(x = NeuroSkin, y = GAITRite)) +
   facet_grid2(side ~ metric, scales = "free", independent = "all") +
@@ -107,10 +147,9 @@ ggplot(df, aes(x = NeuroSkin, y = GAITRite)) +
         strip.clip = "off")
 ```
 
-
 ### Simulations
 
-We can demonstrate using simulations that taking the ratios of 2 variables, each being highly correlated across devices, destroys completely the correlation:
+Using simulations, we demonstrate that taking the ratios of 2 variables, each being highly correlated across devices, destroys completely the correlation:
 
 ```{r}
 #| cache: true
@@ -139,7 +178,6 @@ simcor <- function(n, mu = 0, sd = 1, cor) {
 simcor(n = 1000, cor = 0.9)
 ```
 
-
 ## Redundancies in gait parameters
 
 Reference: <https://www.tekscan.com/blog/medical/gait-cycle-phases-parameters-evaluate-technology>
@@ -153,7 +191,7 @@ In practice, it is almost never the case in data and discrepancies can not alway
 ```{r}
 df %>% 
   filter(metric %in% c("Cycle_time", "Step_time")) %>% 
-  group_by(side, metric) %>%  mutate(id = row_number(), .before = 1) %>% 
+  group_by(side, metric) %>% #mutate(id = row_number(), .before = 1) %>% 
   gather(key = device, value = value, GAITRite, NeuroSkin) %>% 
   spread(key = metric, value = value) %>% 
   mutate(`equal?` = as.numeric(abs(Cycle_time - 2*Step_time) <= .02)) %>% 
@@ -179,7 +217,7 @@ In theory, stance phase is the proportion of cycle time spent in stance.
 In practice, there are small discrepancies that could be explained by rounding errors.
 
 ```{r}
-#| column: page
+#| column: page-right
 
 df %>% 
   filter(metric %in% c("Stance_phase", "Stance_time", "Cycle_time")) %>% 
@@ -200,7 +238,7 @@ In theory, stance phase is the proportion of cycle time spent in stance.
 In practice, there are small discrepancies that could be explained by rounding errors.
 
 ```{r}
-#| column: page
+#| column: page-right
 
 df %>% 
   filter(metric %in% c("Swing_phase", "Swing_time", "Cycle_time")) %>% 
@@ -222,7 +260,7 @@ In theory, swing phase = single support phase (same definitions).
 In practice, it is never the case in the data, and discrepancies can not be explained by rounding errors:
 
 ```{r}
-#| column: page
+#| column: page-right
 
 df %>% 
   filter(metric %in% c("Swing_phase", "Single_support_phase")) %>% 
@@ -240,7 +278,7 @@ df %>%
 In theory, stance phase = single + double support phase, but this only the case for NeuroSkin (up to rounding error), suggesting that the two devices differ in how they compute these gait parameters:
 
 ```{r}
-#| column: page
+#| column: page-right
 
 df %>% 
   filter(metric %in% c("Stance_phase", "Single_support_phase", "Double_support_phase")) %>% 
@@ -260,36 +298,48 @@ df %>%
 
 Intraclass coefficient (ICC) is the most widely reported measure for test-retest performance of, and device comparisons with, the GAITRite (see [meta-analysis](#sec-literature))
 
-### Libraries & functions
+### Helper function
 
 ```{r}
-library(psych)
-
 compute_icc <- function(data) {
-  # Apply ICC function from psych package
-  icc_result <- ICC(data %>% select(-c(metric, side)), lmer = FALSE)
-  
+  # Apply ICC() function from psych package
+  icc_result <- psych::ICC(data %>% select(-c(metric, side)), lmer = FALSE)
+  # Apply icc() function from irr package
+  irr_result <- irr::icc(data %>% select(-c(metric, side)), model = "twoway", unit = "single", type = "agreement")
+  # print(unique(data$metric))
+  # print(unique(data$side))
   icc_result$results %>%
     as_tibble() %>%
     filter(type == "ICC3") %>% 
     mutate(metric = unique(data$metric),
            side = unique(data$side),
-           .before = 1) %>% 
+           .before = 1) 
+  
+  tibble(metric = unique(data$metric),
+         side = unique(data$side),
+         type = "ICC(3,1)",
+         ICC = irr_result$value,
+         `CI low` = irr_result$lbound,
+         `CI high` = irr_result$ubound) %>% 
     return()
 }
+data
+
+# psych::ICC() calculates consistency, not absolute agreement
+# icc_result; irr_result <- irr::icc(data %>% select(-c(metric, side)), model = "twoway", unit = "single", type = "agreement")
+
 ```
 
 ### Compute {#sec-icc}
 
 ```{r}
-#| cache: true
-#| column: page
+#| column: page-right
 
 # Pearson correlation
 df.cor <- df %>% 
   group_split(metric,side) %>% 
   map_dfr(~ mutate(as.data.frame(as.table(cor(.x$GAITRite, .x$NeuroSkin))),
-                   cor = round(Freq, 3),
+                   correlation = round(Freq, 3),
                    metric = unique(.$metric),
                    side = unique(.$side),
                    .before = 1)) %>% 
@@ -297,13 +347,17 @@ df.cor <- df %>%
 
 # ICC
 df.icc <- df %>% 
+  # filter(side != "avg") %>%
+  select(-id) %>% 
   group_split(metric,side) %>% 
   map_dfr(~ compute_icc(.x)) %>% 
-  select(-p) %>%
+  # select(-p) %>%
   mutate(across(is.numeric, ~round(.,3)))
 
 # Bind & print in interactive table
 left_join(df.icc, df.cor, by = c("metric","side")) %>% 
+  # select(metric, side, ICC, `lower bound`, `upper bound`, correlation) %>% 
+  filter(!grepl("phase",metric)) %>% 
   datatable(filter = "top")
 ```
 
@@ -313,12 +367,9 @@ A good absolute measure of how well NeuroSkin matches GAITRite is absolute relat
 
 Because of the highly non-normal distribution of ARE, estimates and confidence intervals should be computed by bootstrapping.
 
-### Libraries & functions
+### Helper functions
 
 ```{r}
-library(boot)
-library(car)
-
 # Mean function with parametrization tailored to boot::boot()
 mean.bootfn <- function(data, ind.samples, var.name) {
   return(mean(data[c(ind.samples),][[var.name]]))
@@ -337,11 +388,10 @@ compute_abserror_bootci <- function(data, n = 1000) {
 }
 ```
 
-### Compute
+### Data per participant
 
 ```{r}
-#| cache: true
-#| column: page
+#| column: page-right
 
 # Calculate relative errors
 df.error <- df %>% 
@@ -351,12 +401,19 @@ df.error <- df %>%
 # Print data in interactive table
 df.error %>%
   mutate(across(contains("error"), ~round(.,3))) %>% 
+  filter(!grepl("phase",metric)) %>% 
   datatable(filter = "top",
             options = list(pageLength = 9))
 
+```
+
+### Bootstrap median & CIs
+
+```{r}
+#| column: page-right
+
 # Compute boot median & CI for all
 df.bootci <- df.error %>%
-  # filter(side == "Right", metric == "Cycle_Time") %>% 
   group_split(metric,side) %>%  # Split by group
   map_dfr(~ mutate(compute_abserror_bootci(., n = 1000),
                    metric = unique(.$metric),
@@ -366,18 +423,17 @@ df.bootci <- df.error %>%
 # Print results in interactive table
 df.bootci %>% 
   mutate(across(is.numeric, ~round(.,3))) %>% 
+  filter(!grepl("phase",metric)) %>% 
   datatable(filter = "top")
 ```
 
 ## TOST
 
-### Libraries & functions
+### Helper functions
 
 We use the generic function `tsum_TOST()` from the `{TOSTER}` package by Daniel Lakens
 
 ```{r}
-library(TOSTER)
-library(BayesFactor)
 
 # Values from Mael's document
 eqb.mael <- list("Step_length" = 2.7,
@@ -436,8 +492,7 @@ p-values are exactly reproduced.
 But these boundaries are inconsistent with data, e.g. it's narrower for the single than for the double support phase , although gait values are higher for single than double.
 
 ```{r}
-#| cache: true
-#| column: page
+#| column: page-right
 
 df.tost.mael <- df %>%
   group_split(metric,side) %>%  # Split by group
@@ -451,8 +506,7 @@ df.tost.mael %>%
 ### Equivalence boundaries = +/- 5% of mean GAITRite values
 
 ```{r}
-#| cache: true
-#| column: page
+#| column: page-right
 
 df.tost.5perc <- df %>%
   group_split(metric,side) %>%  # Split by group
