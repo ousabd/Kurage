@@ -4,7 +4,7 @@ title: "Comparative Analysis of Wearable NeuroSkin and Non-Wearable GAITRite Sen
 execute: 
   message: false
   warning: false
-  cache: refresh
+  cache: true
   
 format:
   html:
@@ -75,7 +75,16 @@ library(tidyverse)  # data loading & wrangling; loaded last to avoid functions b
 theme_set(theme_minimal()) # lean theme for ggplots
 
 # DT interactive tables options
-options(DT.options = list(dom = 'ti'))
+# options(DT.options = list(dom = 'pilt'))
+display_DT <- function(data, nDecimals = 3, pageLength = 9) {
+  data %>% 
+    mutate(across(where(is.numeric), ~round(.,nDecimals))) %>% 
+    mutate(across(where(is.character), as.factor)) %>%  
+    datatable(filter = "top",
+              options = list(#dom = 'pilt',
+                             pageLength = pageLength)) %>% 
+    return()
+}
 
 # Paths
 path.data <- file.path("./data")
@@ -196,18 +205,16 @@ df %>%
   spread(key = metric, value = value) %>% 
   mutate(`equal?` = as.numeric(abs(Cycle_time - 2*Step_time) <= .02)) %>% 
   arrange(device, side) %>%
-  datatable(filter = "top",
-            options = list(pageLength = 9))
+  display_DT
 
 df %>% 
   filter(metric %in% c("Stride_length", "Step_length")) %>% 
-  group_by(side, metric) %>%  mutate(id = row_number(), .before = 1) %>% 
+  group_by(side, metric) %>%  #mutate(id = row_number(), .before = 1) %>% 
   gather(key = device, value = value, GAITRite, NeuroSkin) %>% 
   spread(key = metric, value = value) %>% 
   mutate(`equal?` = as.numeric(abs(Stride_length - 2*Step_length) <= .02)) %>% 
   arrange(device, side) %>%
-  datatable(filter = "top",
-            options = list(pageLength = 9))
+  display_DT
 ```
 
 ### Stance phase = Stance time / Cycle time
@@ -227,8 +234,7 @@ df %>%
   mutate(stance_by_cycle = round(100 * Stance_time / Cycle_time, 3)) %>% 
   mutate(`equal?` = as.numeric(Stance_phase == stance_by_cycle)) %>% 
   arrange(device, side) %>%
-  datatable(filter = "top",
-            options = list(pageLength = 9))
+  display_DT
 ```
 
 ### Swing phase = Swing time / Cycle time
@@ -248,8 +254,7 @@ df %>%
   mutate(swing_by_cycle = round(100 * Swing_time / Cycle_time, 3)) %>% 
   mutate(`equal?` = as.numeric(Swing_phase == swing_by_cycle)) %>% 
   arrange(device, side) %>%
-  datatable(filter = "top",
-            options = list(pageLength = 9))
+  display_DT
 
 ```
 
@@ -269,8 +274,7 @@ df %>%
   spread(key = metric, value = value) %>% 
   mutate(`equal?` = as.numeric(round(abs(Swing_phase - Single_support_phase),1) <= 0.1)) %>% 
   arrange(device, side) %>%
-  datatable(filter = "top",
-            options = list(pageLength = 9))
+  display_DT
 ```
 
 ### Stance phase = Single + Double support phases
@@ -289,8 +293,7 @@ df %>%
          .keep = "unused") %>% 
   mutate(`equal?` = as.numeric(round(abs(single_plus_double - Stance_phase),2) <= 0.01)) %>% 
   arrange(device, side) %>%
-  datatable(filter = "top",
-            options = list(pageLength = 9))
+  display_DT
 
 ```
 
@@ -306,11 +309,11 @@ compute_icc <- function(data) {
   icc_result <- psych::ICC(data %>% select(-c(metric, side)), lmer = FALSE)
   # Apply icc() function from irr package
   irr_result <- irr::icc(data %>% select(-c(metric, side)), model = "twoway", unit = "single", type = "agreement")
-  # print(unique(data$metric))
-  # print(unique(data$side))
+
   icc_result$results %>%
     as_tibble() %>%
     filter(type == "ICC3") %>% 
+    select(-p) %>%
     mutate(metric = unique(data$metric),
            side = unique(data$side),
            .before = 1) 
@@ -323,7 +326,6 @@ compute_icc <- function(data) {
          `CI high` = irr_result$ubound) %>% 
     return()
 }
-data
 
 # psych::ICC() calculates consistency, not absolute agreement
 # icc_result; irr_result <- irr::icc(data %>% select(-c(metric, side)), model = "twoway", unit = "single", type = "agreement")
@@ -333,10 +335,9 @@ data
 ### Compute {#sec-icc}
 
 ```{r}
-#| column: page-right
-
 # Pearson correlation
 df.cor <- df %>% 
+  filter(!grepl("phase",metric)) %>% 
   group_split(metric,side) %>% 
   map_dfr(~ mutate(as.data.frame(as.table(cor(.x$GAITRite, .x$NeuroSkin))),
                    correlation = round(Freq, 3),
@@ -347,18 +348,23 @@ df.cor <- df %>%
 
 # ICC
 df.icc <- df %>% 
-  # filter(side != "avg") %>%
+  filter(!grepl("phase",metric)) %>% 
   select(-id) %>% 
   group_split(metric,side) %>% 
   map_dfr(~ compute_icc(.x)) %>% 
-  # select(-p) %>%
-  mutate(across(is.numeric, ~round(.,3)))
+  mutate(across(is.numeric, ~round(.,3))) %>% 
+  # --- append correlation coefficients
+  left_join(df.cor, by = c("metric","side"))
+
+```
+
+```{r}
+#| column: page-right
+#| cache: false
 
 # Bind & print in interactive table
-left_join(df.icc, df.cor, by = c("metric","side")) %>% 
-  # select(metric, side, ICC, `lower bound`, `upper bound`, correlation) %>% 
-  filter(!grepl("phase",metric)) %>% 
-  datatable(filter = "top")
+df.icc %>% 
+  display_DT(nDecimals = 2)
 ```
 
 ## Absolute relative errors
@@ -392,6 +398,7 @@ compute_abserror_bootci <- function(data, n = 1000) {
 
 ```{r}
 #| column: page-right
+#| cache: false
 
 # Calculate relative errors
 df.error <- df %>% 
@@ -400,31 +407,38 @@ df.error <- df %>%
 
 # Print data in interactive table
 df.error %>%
-  mutate(across(contains("error"), ~round(.,3))) %>% 
   filter(!grepl("phase",metric)) %>% 
-  datatable(filter = "top",
-            options = list(pageLength = 9))
+  display_DT
 
 ```
 
 ### Bootstrap median & CIs
 
-```{r}
-#| column: page-right
+Compute :
 
-# Compute boot median & CI for all
+```{r}
 df.bootci <- df.error %>%
+  filter(!grepl("phase",metric)) %>% 
   group_split(metric,side) %>%  # Split by group
-  map_dfr(~ mutate(compute_abserror_bootci(., n = 1000),
+  map_dfr(~ mutate(compute_abserror_bootci(., n = 5000),
                    metric = unique(.$metric),
                    side = unique(.$side),
                    .before = 1))
+```
 
-# Print results in interactive table
+Display results in interactive table:
+
+```{r}
+#| column: page-right
+#| cache: false
+
 df.bootci %>% 
-  mutate(across(is.numeric, ~round(.,3))) %>% 
-  filter(!grepl("phase",metric)) %>% 
-  datatable(filter = "top")
+  display_DT(nDecimals = 1)
+```
+
+```{r}
+#| include: false
+knitr::knit_exit()
 ```
 
 ## TOST
