@@ -126,8 +126,10 @@ df %<>%
   mutate(side = "Avg") %>% 
   spread(device, value) %>%
   ungroup %>% 
-  bind_rows(df)
-  
+  bind_rows(df) %>% 
+  distinct
+
+
 df %>% group_by(metric, side) %>% summarise(across(is.numeric, mean))
 # Only for testing  of helper functions used in ICC, TOST, etc.:
 data <- df %>% filter(side == "Right", metric == "Swing_time") %>% select(-id)
@@ -149,6 +151,7 @@ Phase parameters do not correlate between the two devices: this is reflected in 
 
 ggplot(df, aes(x = NeuroSkin, y = GAITRite)) +
   facet_grid2(side ~ metric, scales = "free", independent = "all") +
+  geom_abline(slope = 1, intercept = 0, linetype = 2, color = "grey70") +
   geom_point() +
   geom_smooth(method = "lm") +
   coord_cartesian(clip = "off") +
@@ -190,6 +193,21 @@ simcor(n = 1000, cor = 0.9)
 ## Redundancies in gait parameters
 
 Reference: <https://www.tekscan.com/blog/medical/gait-cycle-phases-parameters-evaluate-technology>
+
+### Speed = step length / step time
+
+```{r}
+df %>% 
+  filter(side == "Avg",
+         metric %in% c("Speed","Step_length", "Step_time")) %>% 
+  group_by(metric) %>% #mutate(id = row_number(), .before = 1) %>% 
+  gather(key = device, value = value, GAITRite, NeuroSkin) %>% 
+  spread(key = metric, value = value) %>% 
+  mutate(SpeedCalc = Step_length/Step_time, .after = Speed) %>% 
+  # mutate(`equal?` = as.numeric(abs(Speed - Step_length/Step_time) <= .02)) %>% 
+  arrange(device) %>%
+  display_DT
+```
 
 ### Stride/Cycle = 2x step
 
