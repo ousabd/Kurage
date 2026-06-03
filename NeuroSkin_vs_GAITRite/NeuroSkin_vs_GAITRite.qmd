@@ -330,7 +330,7 @@ compute_icc <- function(data) {
 
   icc_result$results %>%
     as_tibble() %>%
-    filter(type == "ICC3") %>% 
+    filter(type %in% c("ICC3")) %>%
     select(-p) %>%
     mutate(metric = unique(data$metric),
            side = unique(data$side),
@@ -353,16 +353,6 @@ compute_icc <- function(data) {
 ### Compute {#sec-icc}
 
 ```{r}
-# Pearson correlation
-df.cor <- df %>% 
-  filter(!grepl("phase",metric)) %>% 
-  group_split(metric,side) %>% 
-  map_dfr(~ mutate(as.data.frame(as.table(cor(.x$GAITRite, .x$NeuroSkin))),
-                   correlation = round(Freq, 3),
-                   metric = unique(.$metric),
-                   side = unique(.$side),
-                   .before = 1)) %>% 
-  select(-Var1, -Freq)
 
 # ICC
 df.icc <- df %>% 
@@ -377,15 +367,54 @@ df.icc <- df %>%
 ```
 
 ```{r}
+df.icc %>% 
+  display_DT(nDecimals = 4)
+```
+
+```{r}
 #| column: page-right
 #| cache: false
 
 # Bind & print in interactive table
 df.icc %>% 
-  display_DT(nDecimals = 2)
+  display_DT(nDecimals = 4)
 ```
 
-## Absolute relative errors
+## Minimum detectable change
+
+### Correlation
+
+```{r}
+# Pearson correlation
+df.cor <- df %>% 
+  filter(!grepl("phase",metric)) %>% 
+  filter(side == "Avg") %>% 
+  group_split(metric,side) %>% 
+  map_dfr(~ mutate(as.data.frame(as.table(cor(.x$GAITRite, .x$NeuroSkin))),
+                   correlation = round(Freq, 3),
+                   metric = unique(.$metric),
+                   side = unique(.$side),
+                   .before = 1)) %>% 
+  select(-Var1, -Freq)
+```
+
+### MDC
+
+```{r}
+df %>% 
+  filter(side == "Avg") %>% 
+  group_by(metric) %>% 
+  summarise(across(c(GAITRite, NeuroSkin), sd)) %>% 
+  rowwise() %>%
+  mutate(sd = mean(c(GAITRite, NeuroSkin)), .keep = "unused") %>% 
+  left_join(df.cor) %>% 
+  filter(!is.na(correlation)) %>% 
+  mutate(MDC95 = 1.96*sd*sqrt(1-correlation)) 
+
+1.96*
+```
+
+## Relative errors
 
 A good absolute measure of how well NeuroSkin matches GAITRite is absolute relative error (ARE) \[link\](<https://oecd.ai/en/catalogue/metrics/absolute-relative-error-are>)
 
@@ -400,8 +429,8 @@ mean.bootfn <- function(data, ind.samples, var.name) {
 }
 
 # Function to generate bootstrap distributions, and extract median & CI
-compute_abserror_bootci <- function(data, n = 1000) {
-  bt <- boot::boot(data, statistic = mean.bootfn, R = n, var.name = "abserror")
+compute_abserror_bootci <- function(data, var.name, n = 1000) {
+  bt <- boot::boot(data, statistic = mean.bootfn, R = n, var.name = var.name)
   ci <- confint(bt, level = .95, type = 'bca') %>%
     as_tibble() %>% 
     rename(boot.ci.low = `2.5 %`,
@@ -430,15 +459,36 @@ df.error %>%
 
 ```
 
-### Bootstrap median & CIs
+### Bootstrap median & CIs: signed error
+
+```{r}
+df.bootci.sgn <- df.error %>%
+  filter(!grepl("phase",metric)) %>% 
+  group_split(metric,side) %>%  # Split by group
+  map_dfr(~ mutate(compute_abserror_bootci(., var.name = "error", n = 5000),
+                   metric = unique(.$metric),
+                   side = unique(.$side),
+                   .before = 1))
+
+```
+
+```{r}
+#| column: page-right
+#| cache: false
+
+df.bootci.sgn %>% 
+  display_DT(nDecimals = 1)
+```
+
+### Bootstrap median & CIs: absolute error
 
 Compute :
 
 ```{r}
-df.bootci <- df.error %>%
+df.bootci.abs <- df.error %>%
   filter(!grepl("phase",metric)) %>% 
   group_split(metric,side) %>%  # Split by group
-  map_dfr(~ mutate(compute_abserror_bootci(., n = 5000),
+  map_dfr(~ mutate(compute_abserror_bootci(., var.name = "abserror", n = 5000),
                    metric = unique(.$metric),
                    side = unique(.$side),
                    .before = 1))
@@ -450,7 +500,7 @@ Display results in interactive table:
 #| column: page-right
 #| cache: false
 
-df.bootci %>% 
+df.bootci.abs %>% 
   display_DT(nDecimals = 1)
 ```
 
