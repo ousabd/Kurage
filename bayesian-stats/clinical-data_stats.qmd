@@ -1,0 +1,575 @@
+---
+title: "Analyses statistiques des études Zotovic & Rehazenter"
+
+author:
+  name: Oussama Abdoun
+  email: oussama.abdoun@pm.me
+
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-title: "Table des matières"
+    toc-location: left
+    theme: flatly
+    self-contained: true
+    code-fold: true
+    code-summary: "Voir le code"
+    df-print: paged
+
+execute:
+  warning: false
+  message: false
+
+lightbox: true
+
+bibliography: references.bib
+---
+
+# Préparation
+
+## Packages
+
+```{r setup}
+library(BayesFactor) # analyses bayésiennes (calcul du Bayes Factor)
+library(gtsummary)   # tableaux de résultats statistiques mis en forme
+library(DT)          # tableaux interactifs HTML
+library(knitr)       # options de rendu du document
+library(patchwork)   # assemblages de plusieurs graphiques
+library(scales)      # formatage des axes des graphiques
+library(ggtext)      # formatage du texte dans les graphiques
+library(readxl)      # lire les fichiers Excel
+library(tidyverse)   # manipulation et visualisation des données (ggplot2, dplyr…)
+
+# Options globales
+options(scipen = 4)          # éviter la notation scientifique sauf si nécessaire
+set.seed(42)                 # reproductibilité des analyses stochastiques
+```
+
+## Données
+
+```{r load-data}
+# ─────────────────────────────────────────────────────────────────────────────
+# CHARGEMENT ET PRÉPARATION DES DONNÉES
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Lecture du fichier Excel
+df_raw <- read_excel("data/consolidated.xlsx")
+
+# Nettoyage
+# --- On s'assure que les colonnes catégorielles sont bien des facteurs
+df_raw <- df_raw |>
+  mutate(
+    study     = factor(study),
+    treatment = factor(treatment, levels = c("CTRL", "NS"))  # CTRL = référence
+  )
+
+# --- On crée un jeu de données "combiné" (les 2 études ensemble)
+df_combined <- df_raw |>
+  mutate(study = factor("Combined"))
+
+# --- On concatène les 3 jeux (Zotovic, Rehazenter, Combined) dans le même tableau
+df_all <- bind_rows(df_raw, df_combined) |>
+  mutate(study = factor(study, levels = c("Zotovic", "Rehazenter", "Combined")))
+
+# --- Identification automatique des variables d'outcome (se terminent par "deltaV4V1")
+outcome_vars <- names(df_raw) |>
+  keep(~ str_detect(.x, "delta"))
+
+# --- On s'assure que les variables d'outcome sont au format numérique
+df_all <- df_all |>
+  mutate(across(all_of(outcome_vars), as.numeric))
+
+# Les 3 jeux de données à analyser en parallèle
+datasets <- list(
+  Zotovic    = df_all |> filter(study == "Zotovic"),
+  Rehazenter = df_all |> filter(study == "Rehazenter"),
+  Combined   = df_all |> filter(study == "Combined")
+)
+```
+
+## Paramètres d'affichage
+```{r params-display}
+# Noms lisibles pour l'affichage dans les graphiques et tables
+outcome_labels <- c(
+  "NFAC_deltaV4V1"          = "NFAC (V4−V1)",
+  "10MWT_speed_deltaV4V1"   = "10MWT (V4−V1)",
+  "6MWT_dist_deltaV4V1"      = "6MWT (V4−V1)",
+  "TUG_deltaV4V1"           = "TUG (V4−V1)",
+  "MAS_burden_deltaV4V1"    = "MAS burden (V4−V1)",
+  "MRC_total_deltaV4V1"     = "MRC total (V4−V1)"
+)
+
+# Couleurs pour les 3 jeux de données (cohérentes dans tous les graphiques)
+study_colors <- c(
+  "Zotovic"    = "maroon3",   # bleu
+  "Rehazenter" = "dodgerblue3",   # orange
+  "Combined"   = "grey20"    # vert
+)
+
+# Couleurs pour les groupes de traitement
+trt_colors <- c("CTRL" = "aquamarine3", "NS" = "coral")
+```
+
+
+## Fonctions d'analyse
+
+```{r analysis-functions}
+# ─────────────────────────────────────────────────────────────────────────────
+# FONCTIONS D'ANALYSE RÉUTILISABLES
+# Ces fonctions seront appelées en boucle pour chaque variable d'outcome.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── 1. Graphique de distribution (stripchart + boxplot) ──────────────────────
+plot_distribution <- function(data, var, label, study_name) {
+  # Supprime les lignes avec des valeurs manquantes pour la variable
+  d <- data |> filter(!is.na(.data[[var]]))
+
+  ggplot(d, aes(x = treatment, y = .data[[var]], color = treatment, fill = treatment)) +
+    # Boxplot transparent (montre quartiles / médiane)
+    geom_boxplot(
+      alpha = 0.15, width = 0.4,
+      outlier.shape = NA    # les points individuels sont affichés séparément
+    ) +
+    # Points individuels avec un léger décalage horizontal aléatoire (jitter) et un contour blanc
+    # pour limiter les effets de superposition
+    geom_jitter(
+      width = 0.12, size = 3, alpha = 0.8, shape = 21,
+      color = "white", stroke = 0.8
+    ) +
+    # Ligne horizontale en 0 (aucun changement pre-post)
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey50", linewidth = 0.6) +
+    scale_color_manual(values = trt_colors) +
+    scale_fill_manual(values  = trt_colors) +
+    labs(
+      title = study_name,
+      y     = paste("Δ", label),
+      x     = NULL
+    ) +
+    theme_bw(base_size = 11) +
+    theme(
+      legend.position = "none",
+      plot.title      = element_text(face = "bold", hjust = 0.5,
+                                     color = study_colors[study_name]),
+      panel.grid.minor = element_blank()
+    )
+}
+
+# ── 2. T-test non apparié exact ───────────────────────────────────────────────
+run_ttest <- function(data, var) {
+  # Sépare les 2 groupes en supprimant les NA
+  grp_ns   <- data |> filter(treatment == "NS",   !is.na(.data[[var]])) |> pull(.data[[var]])
+  grp_ctrl <- data |> filter(treatment == "CTRL",  !is.na(.data[[var]])) |> pull(.data[[var]])
+
+  # t.test exact (var.equal = FALSE = test de Welch, robuste aux variances inégales)
+  if (length(grp_ns) >= 2 && length(grp_ctrl) >= 2) {
+    t.test(grp_ns, grp_ctrl, var.equal = FALSE)
+  } else {
+    NULL   # pas assez d'observations
+  }
+}
+
+# ── 3. Bayes Factor (package BayesFactor) ────────────────────────────────────
+run_bf <- function(data, var) {
+  # Sépare les 2 groupes en supprimant les NA
+  grp_ns   <- data |> filter(treatment == "NS",   !is.na(.data[[var]])) |> pull(.data[[var]])
+  grp_ctrl <- data |> filter(treatment == "CTRL",  !is.na(.data[[var]])) |> pull(.data[[var]])
+
+  # ttestBF : test bayésien équivalent au t-test indépendant
+  # Prior par défaut (medium : Cauchy, r = 0.707) — hypothèse a priori neutre
+  if (length(grp_ns) >= 2 && length(grp_ctrl) >= 2) {
+    ttestBF(
+      x = grp_ctrl,
+      y = grp_ns,
+      paired = FALSE,
+      rscale = "medium"
+    )
+  } else {
+    NULL   # pas assez d'observations
+  }
+}
+
+# ── 4. Extraction des résultats sous forme tabulaire ─────────────────────────
+extract_results <- function(tt, bf_obj, study_name, n_ns, n_ctrl) {
+  # Initialise avec des NA
+  res <- tibble(
+    Étude       = study_name,
+    `n (NS)`    = n_ns,
+    `n (CTRL)`  = n_ctrl,
+    `Δ moyen (NS−CTRL)` = NA_real_,
+    `IC 95% bas` = NA_real_,
+    `IC 95% haut`= NA_real_,
+    `t`         = NA_real_,
+    `ddl`       = NA_real_,
+    `p-valeur`  = NA_real_,
+    `BF₁₀`      = NA_real_,
+  )
+
+  if (!is.null(tt)) {
+    res$`Δ moyen (NS−CTRL)` <- tt$estimate[1] - tt$estimate[2]
+    res$`IC 95% bas`        <- tt$conf.int[1]
+    res$`IC 95% haut`       <- tt$conf.int[2]
+    res$`t`                 <- tt$statistic
+    res$`ddl`               <- tt$parameter
+    res$`p-valeur`          <- tt$p.value
+  }
+
+  if (!is.null(bf_obj)) {
+    res$`BF₁₀`  <- as.vector(bf_obj)
+  }
+
+  res
+}
+```
+
+---
+
+# Aperçu des données brutes
+
+Le tableau interactif ci-dessous montre l'ensemble des données. Vous pouvez trier, filtrer
+et rechercher des valeurs spécifiques.
+
+```{r raw-data-table}
+
+# On affiche les données originales (sans la ligne "Combined" artificielle)
+datatable(
+  df_raw,
+  filter    = "top",          # filtres colonne par colonne en haut du tableau
+  rownames  = FALSE,
+  extensions = "Buttons",
+  options = list(
+    dom        = "lfBrtip",   # layout : Buttons, Length, Filter, Row, Table, Info, Pagination
+    buttons    = list("csv", "excel", "copy"),   # export CSV / Excel / copie
+    pageLength = 15,
+    scrollX    = TRUE,        # défilement horizontal si besoin
+    columnDefs = list(
+      list(className = "dt-center", targets = "_all")
+    )
+  ),
+  caption = "Tableau 1 : Données brutes — toutes études et tous patients."
+) |>
+  formatRound(columns = outcome_vars, digits = 3) |>
+  formatStyle("id_subject",
+    `min-width` = "160px"
+  ) |>
+  formatStyle("treatment",
+    backgroundColor = styleEqual(c("CTRL", "NS"), c("aquamarine","coral"))
+  ) |>
+  formatStyle("study",
+    fontWeight = "bold"
+  )
+
+idx_table <- 1
+```
+
+---
+
+# Analyses statistiques
+
+<!-- > **Comment lire ces analyses ?**
+>
+> Pour chaque variable, trois jeux de données sont analysés en parallèle :
+> **Zotovic**, **Rehazenter**, et **Combined** (les deux études réunies).
+>
+> - **Graphique de distribution** : chaque point représente un patient.
+>   La ligne centrale est la médiane, les rectangles encadrent le 1er et 3e quartile.
+>   Ce type de représentation est adapté aux petits échantillons.
+> - **T-test non apparié** (fréquentiste) : teste si la différence de moyennes
+>   entre NS et CTRL est compatible avec l'hypothèse nulle (pas de différence).
+>   On rapporte la valeur p et l'intervalle de confiance à 95 % de la différence.
+> - **Bayes Factor (BF₁₀)** : quantifie le soutien que les données apportent
+>   à l'hypothèse d'une différence (H₁) par rapport à l'absence de différence (H₀).
+>   BF > 3 : preuve modérée pour H₁ ; BF < 1/3 : preuve modérée pour H₀. -->
+
+```{r}
+#| label: build-tabs-data
+#| results: asis
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BOUCLE PRINCIPALE : génère un onglet par variable d'outcome
+# ─────────────────────────────────────────────────────────────────────────────
+
+results_list <- list()   # stocke les résultats tabulaires
+plots_dist <- list()     # stocke les graphiques de distribution
+
+# Boucler sur chaque variable d'outcome
+for (var in outcome_vars) {
+
+  # Récupérer le libellé lisible de la variable
+  label <- outcome_labels[var]
+
+  # ── Analyses pour les 3 jeux de données ─────────────────────────────────
+  results_list[[var]] <- list()   # stocke les résultats tabulaires
+  plots_dist[[var]] <- list()     # stocke les graphiques de distribution
+
+  for (study_name in names(datasets)) {
+    d <- datasets[[study_name]]
+
+    # Tailles des groupes (pour le tableau de résultats)
+    n_ns   <- sum(!is.na(d[[var]]) & d$treatment == "NS")
+    n_ctrl <- sum(!is.na(d[[var]]) & d$treatment == "CTRL")
+
+    # T-test et Bayes Factor
+    tt     <- run_ttest(d, var)
+    bf_obj <- run_bf(d, var)
+
+    # Compilation des résultats
+    results_list[[var]][[study_name]] <- extract_results(tt, bf_obj, study_name, n_ns, n_ctrl)
+
+    # Graphique de distribution
+    plots_dist[[var]][[study_name]] <- plot_distribution(d, var, label, study_name)
+  }
+}
+```
+
+## Distributions NS vs CTRL
+
+::: {.panel-tabset group="vars"}
+
+```{r data-plots}
+#| results: asis
+
+# Boucler sur chaque variable d'outcome
+for (var in outcome_vars) {
+
+  # Récupérer le libellé lisible de la variable
+  label <- outcome_labels[var]
+
+  # ── En-tête de l'onglet ──────────────────────────────────────────────────
+  cat("\n\n## ", label, "\n\n")
+
+  # ── Assemblage des 3 graphiques de distribution côte à côte ─────────────
+  # patchwork assemble les 3 plots avec un titre commun
+  combined_plot <- (plots_dist[[var]]$Zotovic | plots_dist[[var]]$Rehazenter | plots_dist[[var]]$Combined) +
+    plot_annotation(
+      title   = paste("Distribution —", label),
+      caption = "Points : observations individuelles. Ligne : médiane. Boîte : Q1–Q3. ",
+      theme   = theme(
+        plot.title   = element_text(face = "bold", size = 13, hjust = 0.5),
+        plot.caption = element_text(color = "grey50", size = 9)
+      )
+    )
+
+  # Pour afficher le graphique dans une boucle results='asis', on doit l'imprimer
+  print(combined_plot)
+  # cat("\n\n")
+}
+```
+
+:::
+
+
+## Résultats statistiques
+
+::: {.panel-tabset group="vars"}
+
+```{r stats-tables}
+#| results: asis
+
+# Boucler sur chaque variable d'outcome
+for (var in outcome_vars) {
+
+  # Récupérer le libellé lisible de la variable
+  label <- outcome_labels[var]
+
+  # ── En-tête de l'onglet ──────────────────────────────────────────────────
+  cat("\n\n## ", label, "\n\n")
+
+  # ── Table de résultats compilée ──────────────────────────────────────────
+  # cat("### Résultats statistiques\n\n")
+
+  cat("::: {.callout-note collapse='true'}\n")
+  cat("##### Guide d'interprétation\n")
+  cat("#### T-test de Welch (analyse fréquentiste)\n\n")
+  cat("Compare les moyennes de deux groupes indépendants sans supposer que leurs variances sont égales (hypothèse souvent non vérifiable avec de petits échantillons). Il produit :\n\n")
+  cat("- Une **valeur p** : probabilité d'observer une différence au moins aussi grande si l'hypothèse nulle était vraie. Seuil conventionnel : p < 0,05. Une valeur élevée ne valide **pas** l'hypothèse nulle.\n\n")
+  cat("- Un **intervalle de confiance (IC) à 95 %** de la différence des moyennes. Si l'IC ne contient pas 0, la différence est statistiquement significative.\n\n")
+  cat("#### Facteur de Bayes (analyse bayésienne)\n\n")
+  cat("Le prior utilisé est une distribution de Cauchy centrée en 0 avec r = 0,707 (prior par défaut de @Rouder2009_BayesianTestsAccepting), qui encode une incertitude symétrique et raisonnable sur la taille de l'effet.\n\n")
+  cat("Le **BF₁₀** (*Bayes Factor*) quantifie le rapport de vraisemblance entre l'hypothèse H₁ (il existe une différence) et H₀ (pas de différence). @Kass1995_BayesFactors ont proposé les seuils d'interprétation suivants :\n\n")
+  cat(
+    "| BF₁₀         | Interprétation                        |\n",
+    "|:------------:|:--------------------------------------|\n",
+    "| > 100        | Preuve décisive pour H₁               |\n",
+    "| 10 – 100     | Preuve forte pour H₁                  |\n",
+    "| 3 – 10       | Preuve modérée pour H₁                |\n",
+    "| 1 – 3        | Preuve anecdotique pour H₁            |\n",
+    "| 1            | Données non informatives              |\n",
+    "| 1 – 1/3      | Preuve anecdotique pour H₀            |\n",
+    "| 1/3 – 1/10   | Preuve modérée pour H₀                |\n",
+    "| 1/10 – 1/100 | Preuve forte pour H₀                  |\n",
+    "| < 1/100      | Preuve décisive pour H₀               |\n\n",
+      sep = ""
+  )
+  cat("**Note :** Les niveaux de preuve anecdotiques doivent être considérés comme *non conclusifs*.\n")
+  cat(":::\n\n")
+
+  results_df <- bind_rows(results_list[[var]])
+
+  # Formatage et affichage avec kable (compatible avec results='asis')
+  idx_table <- idx_table + 1
+
+  cat(kable(
+    results_df,
+    digits  = c(0, 0, 0, 3, 3, 3, 2, 1, 3, 2),
+    caption = paste("Tableau ", idx_table, " — Résultats pour :", label),
+    format  = "html",
+    escape  = FALSE
+  ) |>
+    kableExtra::kable_styling(
+      bootstrap_options = c("striped", "hover", "condensed"),
+      full_width        = FALSE
+    ) |>
+    kableExtra::column_spec(9, bold = TRUE,  # colonne p-valeur
+      color = ifelse(results_df$`p-valeur` < 0.05, "green", "black")) |>
+    kableExtra::column_spec(10, bold = TRUE, # colonne BF
+      color = ifelse(results_df$`BF₁₀` > 3, "green", ifelse(results_df$`BF₁₀` < 1/3, "red", "black"))
+    )
+  )
+
+  cat("\n\n")
+}
+```
+
+:::
+
+
+## Synthèse graphique des résultats
+
+::: {.panel-tabset group="vars"}
+
+```{r stats-graphs}
+#| results: asis
+
+# Boucler sur chaque variable d'outcome
+for (var in outcome_vars) {
+
+  results_df <- bind_rows(results_list[[var]])
+
+  # Récupérer le libellé lisible de la variable
+  label <- outcome_labels[var]
+
+  # ── En-tête de l'onglet ──────────────────────────────────────────────────
+  cat("\n\n## ", label, "\n\n")
+
+  # ── Graphique de synthèse : différence et BF par étude ───────────────────
+  # cat("### Synthèse graphique des résultats\n\n")
+
+  # Graphique 1 : différence des moyennes + IC 95 %
+  p_diff <- results_df |>
+    filter(!is.na(`Δ moyen (NS−CTRL)`)) |>
+    mutate(Étude = factor(Étude, levels = c("Zotovic", "Rehazenter", "Combined"))) |>
+    ggplot(aes(x = Étude, y = `Δ moyen (NS−CTRL)`, color = Étude)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+    geom_errorbar(
+      aes(ymin = `IC 95% bas`, ymax = `IC 95% haut`),
+      width = 0.15, linewidth = 1
+    ) +
+    geom_point(size = 4) +
+    scale_color_manual(values = study_colors) +
+    labs(
+      title    = "Différence NS − CTRL (IC 95 %)",
+      subtitle = "Si l'IC ne chevauche pas 0, la différence est statistiquement significative",
+      y        = paste("Δ", label),
+      x        = NULL
+    ) +
+    theme_bw(base_size = 11) +
+    theme(legend.position = "none",
+          plot.title    = element_text(face = "bold"),
+          plot.subtitle = element_textbox_simple(color = "grey40", size = 9, lineheight = 1.2, vjust = 1),
+          axis.text.x = element_text(size = 11)
+          )
+
+  # Graphique 2 : BF10 par étude
+  # On utilise une échelle logarithmique pour mieux visualiser les BF très grands ou très petits.
+  # Lignes de référence : BF = 3 (preuve modérée pour H1), BF = 1/3 (pour H0)
+  p_bf <- results_df |>
+    filter(!is.na(`BF₁₀`)) |>
+    mutate(Étude = factor(Étude, levels = c("Zotovic", "Rehazenter", "Combined"))) |>
+    ggplot(aes(x = Étude, y = `BF₁₀`, fill = Étude)) +
+    geom_hline(yintercept = 3,   linetype = "dashed", color = "green", linewidth = 0.7) +
+    geom_hline(yintercept = 1,   linetype = "solid",  color = "grey50",  linewidth = 0.5) +
+    geom_hline(yintercept = 1/3, linetype = "dashed", color = "red", linewidth = 0.7) +
+    geom_rect(aes(
+      xmin = as.numeric(factor(Étude)) - 0.4,
+      xmax = as.numeric(factor(Étude)) + 0.4,
+      ymin = 1,
+      ymax = `BF₁₀`
+    ), alpha = 0.8) +
+    geom_text(aes(label = round(`BF₁₀`, 2),
+                  vjust = ifelse(`BF₁₀` >= 1, -0.5, 1.3)),
+              size = 3.5, fontface = "bold") +
+    scale_fill_manual(values = study_colors) +
+    scale_y_continuous(
+      name   = "BF₁₀",
+      breaks = c(1/10, 1/3, 1, 3, 10),
+      labels = c("1/10", "1/3", "1", "3", "10")
+    ) +
+    labs(
+      title    = "Facteur de Bayes (BF₁₀)",
+      subtitle = "BF>3 : preuve modérée pour H₁<br>BF<1/3 : preuve modérée pour H₀<br>1/3<BF<3 : preuve inconclusive",
+      x        = NULL
+    ) +
+    coord_transform(y = "log10") +
+    theme_bw(base_size = 11) +
+    theme(legend.position = "none",
+          plot.title    = element_text(face = "bold"),
+          plot.subtitle = element_textbox_simple(color = "grey40", size = 9, lineheight = 1.2, vjust = 1),
+          axis.text.x = element_text(size = 11)
+          )
+
+  # Assemblage côte à côte
+  print(p_diff | p_bf)
+
+}
+```
+
+:::
+
+
+<!-- ## Guide d'interprétation
+
+### T-test de Welch (analyse fréquentiste)
+
+Le **t-test non apparié de Welch** compare les moyennes de deux groupes
+indépendants sans supposer que leurs variances sont égales (hypothèse souvent
+non vérifiable avec de petits échantillons). Il produit :
+
+- Une **valeur p** : probabilité d'observer une différence au moins aussi grande
+  si l'hypothèse nulle était vraie. Seuil conventionnel : p < 0,05.
+- Un **intervalle de confiance à 95 %** de la différence des moyennes.
+  Si l'IC ne contient pas 0, la différence est statistiquement significative.
+
+### Facteur de Bayes (analyse bayésienne)
+
+Le **BF₁₀** (*Bayes Factor*) quantifie le rapport de vraisemblance entre
+l'hypothèse H₁ (il existe une différence) et H₀ (pas de différence). Kass and Raftery (1995) ont proposé les seuils d'interprétation suivants :
+
+| BF₁₀         | Interprétation                        |
+|:------------:|:--------------------------------------|
+| > 100        | Preuve décisive pour H₁               |
+| 10 – 100     | Preuve forte pour H₁                  |
+| 3 – 10       | Preuve modérée pour H₁                |
+| 1 – 3        | Preuve anecdotique pour H₁            |
+| 1            | Données non informatives              |
+| 1 – 1/3      | Preuve anecdotique pour H₀            |
+| 1/3 – 1/10   | Preuve modérée pour H₀                |
+| 1/10 – 1/100 | Preuve forte pour H₀                  |
+| < 1/100      | Preuve décisive pour H₀               |
+
+Les niveaux de preuve anecdotiques sont considérés comme non conclusifs.
+
+Le prior utilisé est une distribution de Cauchy centrée en 0 avec r = 0,707
+(prior par défaut de Rouder et al., 2009), qui encode une incertitude
+symétrique et raisonnable sur la taille de l'effet. -->
+
+
+---
+
+<!-- *Document généré automatiquement avec R et Quarto.*
+*Packages : `readxl`, `tidyverse`, `BayesFactor`, `gtsummary`, `DT`, `patchwork`, `kableExtra`.* -->
+
+# Références
+
+::: {#refs}
+:::
